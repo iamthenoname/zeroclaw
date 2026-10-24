@@ -462,6 +462,10 @@ values while `message_max_bytes` still bounds the rendered draft. Explicit
 `all` applies to unknown tools; use an exact-name rule when enabling arguments
 for only one extension tool.
 
+### Tool approval over chat (`approval_timeout_secs`)
+
+When a tool needs approval (it is in `always_ask`, or the risk profile does not auto-approve it), the agent posts the request into the room the message came from and waits. The prompt lands in the same thread as the turn that triggered it, so the decision stays next to the tool call instead of scrolling away in the room timeline. A turn with no thread anchor posts in the timeline, and with `reply_in_thread = false` the prompt stays in the timeline like every other reply. A configured `approval_route` overrides all of this: the prompt goes to the configured approver channel instead and does not inherit the origin thread.
+
 ## 8. Auto-recovery from corrupted local state
 
 The matrix-rust-sdk default SQLite store is single-device and assumes the local view stays in sync with the homeserver. Two failure modes break that assumption irrecoverably; ZeroClaw detects each at startup and (when `password` + `user_id` are both configured) auto-wipes `~/.zeroclaw/state/matrix/` and re-authenticates so a fresh device is created server-side.

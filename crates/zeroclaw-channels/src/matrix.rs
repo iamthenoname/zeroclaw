@@ -259,10 +259,15 @@ mod approval {
 
     /// Build the outbound `SendMessage` for an approval prompt: the rendered
     /// prompt text to the requesting recipient, with voice synthesis
-    /// suppressed. Kept as a small, pure helper so tests can assert its shape
-    /// (recipient, voice suppression) without standing up a live client.
-    pub(super) fn build_prompt_message(prompt: String, recipient: &str) -> SendMessage {
-        SendMessage::new(prompt, recipient).suppress_voice()
+    /// suppressed and the originating thread carried when the turn had one.
+    pub(super) fn build_prompt_message(
+        prompt: String,
+        recipient: &str,
+        thread_ts: Option<&str>,
+    ) -> SendMessage {
+        SendMessage::new(prompt, recipient)
+            .suppress_voice()
+            .in_thread(thread_ts.map(str::to_string))
     }
 
     /// Try to parse an approval reply. Returns `Some((token, response))` if the
@@ -5495,7 +5500,8 @@ impl Channel for MatrixChannel {
             token.clone(),
         );
 
-        let send_msg = approval::build_prompt_message(prompt, recipient);
+        let send_msg =
+            approval::build_prompt_message(prompt, recipient, request.thread_ts.as_deref());
         if let Err(e) = self.send(&send_msg).await {
             guard.remove().await;
             return Err(e);
@@ -7898,6 +7904,8 @@ mod tests {
         use std::collections::HashSet;
         use zeroclaw_api::channel::ChannelApprovalResponse;
 
+        use super::super::outbound::outbound_thread_anchor;
+
         #[tokio::test]
         async fn pending_approval_requires_allowed_user_and_origin_room() {
             let pending = tokio::sync::Mutex::new(std::collections::HashMap::new());
@@ -8074,7 +8082,7 @@ mod tests {
                 None,
             );
 
-            let message = build_prompt_message(prompt.clone(), "!room:example.invalid");
+            let message = build_prompt_message(prompt.clone(), "!room:example.invalid", None);
 
             assert_eq!(message.recipient, "!room:example.invalid");
             assert_eq!(message.content, prompt);
@@ -8083,6 +8091,42 @@ mod tests {
                 "the approval prompt must suppress voice synthesis"
             );
             assert!(!message.force_voice);
+        }
+
+        #[test]
+        fn approval_prompt_follows_the_origin_thread_and_never_invents_one() {
+            let threaded = build_prompt_message(
+                "APPROVAL REQUIRED".to_string(),
+                "!room:example.invalid",
+                Some("$anchor:example.invalid"),
+            );
+            assert_eq!(
+                threaded.thread_ts.as_deref(),
+                Some("$anchor:example.invalid"),
+                "a turn with a thread anchor must carry it into the prompt"
+            );
+            assert_eq!(
+                outbound_thread_anchor(true, threaded.thread_ts.as_deref()),
+                Some("$anchor:example.invalid"),
+                "the prompt must land in the originating thread"
+            );
+
+            let unthreaded = build_prompt_message(
+                "APPROVAL REQUIRED".to_string(),
+                "!room:example.invalid",
+                None,
+            );
+            assert_eq!(unthreaded.thread_ts, None);
+            assert_eq!(
+                outbound_thread_anchor(true, unthreaded.thread_ts.as_deref()),
+                None,
+                "a turn with no thread anchor must post in the room timeline"
+            );
+            assert_eq!(
+                outbound_thread_anchor(false, threaded.thread_ts.as_deref()),
+                None,
+                "reply_in_thread = false keeps every send out of threads"
+            );
         }
 
         #[test]
