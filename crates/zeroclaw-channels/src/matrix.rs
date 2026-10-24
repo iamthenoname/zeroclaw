@@ -270,10 +270,31 @@ mod approval {
             .in_thread(thread_ts.map(str::to_string))
     }
 
+    /// Strip the `> ` fallback lines a client's rich reply prepends, so an
+    /// operator can answer the prompt with their reply affordance. A body that
+    /// is nothing but the quote is left alone: quoting the prompt is not
+    /// answering it.
+    pub(super) fn strip_quoted_fallback(body: &str) -> &str {
+        if !body.trim_start().starts_with('>') {
+            return body;
+        }
+        let mut rest = body;
+        while let Some(line) = rest.lines().next() {
+            let trimmed = line.trim_start();
+            if !(trimmed.starts_with('>') || trimmed.is_empty()) {
+                return rest;
+            }
+            let consumed = line.len() + usize::from(rest.len() > line.len());
+            rest = &rest[consumed.min(rest.len())..];
+        }
+        body
+    }
+
     /// Try to parse an approval reply. Returns `Some((token, response))` if the
-    /// body matches `<TOKEN> (approve|deny|always|yes|no)` (case-insensitive).
+    /// body matches `<TOKEN> (approve|deny|always|yes|no)` (case-insensitive),
+    /// after any quoted reply fallback is stripped.
     pub(super) fn parse_reply(body: &str) -> Option<(String, ChannelApprovalResponse)> {
-        let trimmed = body.trim();
+        let trimmed = strip_quoted_fallback(body).trim();
         let mut parts = trimmed.split_whitespace();
         let token = parts.next()?;
         if token.len() != TOKEN_LEN {
@@ -8071,6 +8092,32 @@ mod tests {
         #[test]
         fn rejects_trailing_garbage() {
             assert!(parse_reply("ABCDEFGH approve please").is_none());
+        }
+
+        /// A client's reply affordance prefixes the quoted prompt, so answering
+        /// the prompt by replying to it must still resolve.
+        #[test]
+        fn parse_reply_strips_the_rich_reply_fallback() {
+            let body = "> <@bot:example.invalid> APPROVAL REQUIRED [ABCDEFGH]\n\
+> Tool: shell\n\
+> Args: command: pwd\n\
+\n\
+ABCDEFGH approve";
+            assert_eq!(
+                parse_reply(body),
+                Some(("ABCDEFGH".to_string(), ChannelApprovalResponse::Approve))
+            );
+        }
+
+        #[test]
+        fn quoting_the_prompt_without_answering_does_not_approve() {
+            let quoted_only = "> <@bot:example.invalid> APPROVAL REQUIRED [ABCDEFGH]\n\
+> Tool: shell";
+            assert!(parse_reply(quoted_only).is_none());
+            assert!(
+                parse_reply("> ABCDEFGH approve").is_none(),
+                "a quoted token is not an answer"
+            );
         }
 
         #[test]
