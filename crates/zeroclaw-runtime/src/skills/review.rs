@@ -187,6 +187,7 @@ pub async fn maybe_run_skill_review(
                 // no human in the loop here
                 channel_name: "skill_review",
                 channel_reply_target: None,
+                channel_thread_anchor: None,
                 cancellation_token: cancellation_token.cloned(),
                 on_delta: None,
                 shared_budget: None,

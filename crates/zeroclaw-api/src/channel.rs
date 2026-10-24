@@ -120,6 +120,10 @@ pub struct ChannelApprovalRequest {
     /// count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<ApprovalPosition>,
+    /// Originating platform thread anchor, when the caller has one. Matrix
+    /// posts the prompt in this thread so the decision stays with the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_ts: Option<String>,
 }
 
 impl ChannelApprovalRequest {
@@ -1768,6 +1772,32 @@ mod tests {
             handle: Some("@".into()),
         };
         assert!(!channel.drop_self_messages(&msg_from("@anyone")));
+    }
+
+    #[test]
+    fn channel_approval_request_thread_ts_defaults_to_none() {
+        let request: ChannelApprovalRequest =
+            serde_json::from_str(r#"{"tool_name":"shell","arguments_summary":"ls"}"#).unwrap();
+        assert_eq!(request.thread_ts, None);
+    }
+
+    #[test]
+    fn channel_approval_request_thread_ts_round_trips_and_is_omitted_when_unset() {
+        let mut request = ChannelApprovalRequest {
+            tool_name: "shell".to_string(),
+            arguments_summary: "ls".to_string(),
+            raw_arguments: None,
+            position: None,
+            thread_ts: Some("$anchor".to_string()),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""thread_ts":"$anchor""#));
+        let back: ChannelApprovalRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.thread_ts.as_deref(), Some("$anchor"));
+
+        request.thread_ts = None;
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("thread_ts"));
     }
 
     #[test]

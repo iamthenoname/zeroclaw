@@ -7513,6 +7513,7 @@ mod tests {
             arguments_summary: "ls".to_string(),
             raw_arguments: None,
             position: None,
+            thread_ts: None,
         };
 
         let err = channel
@@ -7576,6 +7577,7 @@ mod tests {
                 arguments_summary: "ls -la".to_string(),
                 raw_arguments: None,
                 position: None,
+                thread_ts: None,
             };
             channel
                 .request_approval(recipient, &request)
@@ -7968,6 +7970,7 @@ mod tests {
                 arguments_summary: format!("echo {word}"),
                 raw_arguments: None,
                 position: None,
+                thread_ts: None,
             };
 
             let asking = channel.request_approval(&chat, &request);
@@ -8107,6 +8110,7 @@ mod tests {
             arguments_summary: "ls".to_string(),
             raw_arguments: None,
             position: None,
+            thread_ts: None,
         };
         let err = channel
             .request_approval("1@s.whatsapp.net", &request)
@@ -9156,6 +9160,7 @@ mod tests {
             arguments_summary: "ls".to_string(),
             raw_arguments: None,
             position: None,
+            thread_ts: None,
         };
 
         let decision = channel
@@ -9234,6 +9239,7 @@ mod tests {
                 arguments_summary: "ls".to_string(),
                 raw_arguments: None,
                 position: None,
+                thread_ts: None,
             };
 
             let started = tokio::time::Instant::now();

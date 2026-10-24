@@ -179,12 +179,18 @@ pub(crate) async fn resolve_routed_approval(
         if let Some((channel_name, channel)) = approver {
             let approver_recipient = approver_recipient.unwrap_or_default();
             let dur = std::time::Duration::from_secs(route.timeout_secs.max(1));
+            // A routed approver is a different destination than the origin
+            // thread, so the origin anchor must not leak into its prompt.
+            let routed_request = zeroclaw_api::channel::ChannelApprovalRequest {
+                thread_ts: None,
+                ..request.clone()
+            };
             // Attributed, not legacy: if the approver channel synthesizes its own
             // `Some(Deny)` (its inner timeout firing before this outer one), that
             // is a runtime denial and must not be relabelled as the approver's
             // decision just because a response came back.
             match channel
-                .request_approval_attributed_with_timeout(approver_recipient, request, dur)
+                .request_approval_attributed_with_timeout(approver_recipient, &routed_request, dur)
                 .await
             {
                 Ok(Some(attributed)) if attributed.source.is_runtime_fail_closed() => (
@@ -4167,6 +4173,7 @@ impl Agent {
                         injected_memory_preamble: &mut loop_injected_memory_preamble,
                         channel_name: &self.channel_name,
                         channel_reply_target: None,
+                        channel_thread_anchor: None,
                         cancellation_token: None,
                         on_delta: None,
                         shared_budget: execution_tree_budget.clone(),
@@ -4822,6 +4829,7 @@ impl Agent {
                             injected_memory_preamble: &mut loop_injected_memory_preamble,
                             channel_name: &self.channel_name,
                             channel_reply_target: None,
+                            channel_thread_anchor: None,
                             cancellation_token: cancel_token.clone(),
                             on_delta: None,
                             shared_budget: execution_tree_budget.clone(),
@@ -20552,6 +20560,7 @@ mod approval_route_tests {
         name: String,
         behavior: StubBehavior,
         seen_recipient: Arc<parking_lot::Mutex<Option<String>>>,
+        seen_thread_ts: Arc<parking_lot::Mutex<Option<Option<String>>>>,
         seen_route_timeout: Option<Arc<parking_lot::Mutex<Option<std::time::Duration>>>>,
     }
 
@@ -20602,6 +20611,7 @@ mod approval_route_tests {
             request: &ChannelApprovalRequest,
         ) -> anyhow::Result<Option<zeroclaw_api::channel::AttributedApprovalResponse>> {
             *self.seen_recipient.lock() = Some(recipient.to_string());
+            *self.seen_thread_ts.lock() = Some(request.thread_ts.clone());
             if matches!(&self.behavior, StubBehavior::RuntimeTimeout) {
                 return Ok(Some(
                     zeroclaw_api::channel::AttributedApprovalResponse::from_runtime(
@@ -20658,6 +20668,7 @@ mod approval_route_tests {
             arguments_summary: "rm -rf /".into(),
             raw_arguments: None,
             position: None,
+            thread_ts: None,
         }
     }
 
@@ -20679,6 +20690,7 @@ mod approval_route_tests {
             name: name.into(),
             behavior,
             seen_recipient: seen_recipient(),
+            seen_thread_ts: Arc::new(parking_lot::Mutex::new(None)),
             seen_route_timeout: None,
         }
     }
@@ -20709,6 +20721,62 @@ mod approval_route_tests {
             }
             RoutedApproval::Fallthrough => panic!("expected a routed decision"),
         }
+    }
+
+    #[tokio::test]
+    async fn routed_approval_never_forwards_the_origin_thread_anchor() {
+        let seen = Arc::new(parking_lot::Mutex::new(None));
+        let mut approver = stub(
+            "ops",
+            StubBehavior::Answer(ChannelApprovalResponse::Approve),
+        );
+        approver.seen_thread_ts = Arc::clone(&seen);
+        let h = registry(vec![approver]);
+
+        let mut request = req();
+        request.thread_ts = Some("$origin-anchor:example.invalid".into());
+        let out =
+            resolve_routed_approval(&h, &route("ops", OnNoApprover::Deny), "origin", &request)
+                .await;
+
+        assert!(matches!(out, RoutedApproval::Decided { .. }));
+        assert_eq!(
+            seen.lock().as_ref().expect("the approver must be asked"),
+            &None,
+            "a routed approver is a different destination than the origin thread"
+        );
+    }
+
+    /// `InheritOriginator` defers to the origin channel with the request
+    /// untouched, so a prompt raised inside a thread stays in that thread.
+    #[tokio::test]
+    async fn inherit_originator_keeps_the_origin_thread_anchor() {
+        let seen = Arc::new(parking_lot::Mutex::new(None));
+        let mut origin = stub(
+            "matrix",
+            StubBehavior::Answer(ChannelApprovalResponse::Approve),
+        );
+        origin.seen_thread_ts = Arc::clone(&seen);
+        let bridge = RoutedApprovalChannel::with_origin(
+            registry(vec![]),
+            route("ops", OnNoApprover::InheritOriginator),
+            Arc::new(origin),
+        );
+
+        let mut request = req();
+        request.thread_ts = Some("$origin-anchor:example.invalid".into());
+        let out = bridge
+            .request_approval_attributed("r", &request)
+            .await
+            .unwrap()
+            .expect("the origin answered");
+
+        assert_eq!(out.response, ChannelApprovalResponse::Approve);
+        assert_eq!(
+            seen.lock().as_ref().expect("the origin must be asked"),
+            &Some("$origin-anchor:example.invalid".to_string()),
+            "inherit-originator must keep the prompt in the origin thread"
+        );
     }
 
     #[tokio::test]

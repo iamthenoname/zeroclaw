@@ -21,6 +21,9 @@ pub(crate) struct TurnCtx<'a> {
     pub(crate) approval: Option<&'a ApprovalManager>,
     pub(crate) channel_name: &'a str,
     pub(crate) channel_reply_target: Option<&'a str>,
+    /// Originating platform thread anchor for this turn, when the inbound
+    /// message carried one. Approval prompts reuse it to stay in the thread.
+    pub(crate) channel_thread_anchor: Option<&'a str>,
     pub(crate) cancellation_token: Option<&'a CancellationToken>,
     pub(crate) on_delta: Option<&'a Sender<DraftEvent>>,
     pub(crate) event_tx: Option<&'a Sender<TurnEvent>>,
@@ -87,6 +90,7 @@ impl<'a> TurnCtx<'a> {
             approval: self.approval,
             channel_name: self.channel_name,
             channel_reply_target: self.channel_reply_target,
+            channel_thread_anchor: self.channel_thread_anchor,
             cancellation_token: self.cancellation_token,
             on_delta: self.on_delta,
             event_tx: self.event_tx,

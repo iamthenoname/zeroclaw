@@ -192,6 +192,7 @@ async fn parity_l1_engine_honors_excluded_tools() {
         injected_memory_preamble: &mut None,
         channel_name: "cli",
         channel_reply_target: None,
+        channel_thread_anchor: None,
         cancellation_token: None,
         on_delta: Some(dtx),
         shared_budget: None,

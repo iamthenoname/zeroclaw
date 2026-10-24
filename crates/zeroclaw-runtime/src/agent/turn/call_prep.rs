@@ -504,6 +504,7 @@ mod tests {
             approval: None,
             channel_name: "test",
             channel_reply_target: None,
+            channel_thread_anchor: None,
             cancellation_token: None,
             on_delta: Some(on_delta),
             event_tx: None,
@@ -869,6 +870,7 @@ mod tests {
         let ctx = TurnCtx {
             channel: Some(&channel),
             channel_reply_target: Some("operator"),
+            channel_thread_anchor: None,
             cancellation_token: Some(&cancel),
             on_delta: None,
             ..lifecycle_ctx(&observer, &pacing, &tx, Some(&approval), Some(&runner))

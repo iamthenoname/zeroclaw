@@ -10479,6 +10479,7 @@ async fn process_channel_message_body(
                 injected_memory_preamble: &mut channel_injected_memory_preamble,
                 channel_name: msg.channel.as_str(),
                 channel_reply_target: Some(msg.reply_target.as_str()),
+                channel_thread_anchor: msg.thread_ts.as_deref(),
                 cancellation_token: Some(cancellation_token.clone()),
                 on_delta: delta_tx.clone(),
                 shared_budget: execution_tree_budget.clone(),
@@ -26643,6 +26644,33 @@ api_key = "anthropic-key"
             auto_approve: tools.iter().map(|tool| tool.name().to_string()).collect(),
             ..Default::default()
         };
+        test_runtime_ctx_with_observer_tools_and_profile(
+            channel,
+            model_provider,
+            prompt_config,
+            agent_cfg,
+            model_provider_ref,
+            hooks,
+            observer,
+            tools,
+            risk_profile,
+        )
+    }
+
+    /// Same context, but the caller owns the risk profile so a test can gate a
+    /// tool through `always_ask` instead of auto-approving everything.
+    #[allow(clippy::too_many_arguments)]
+    fn test_runtime_ctx_with_observer_tools_and_profile(
+        channel: Arc<dyn Channel>,
+        model_provider: Arc<dyn ModelProvider>,
+        prompt_config: zeroclaw_config::schema::Config,
+        agent_cfg: zeroclaw_config::schema::AliasedAgentConfig,
+        model_provider_ref: &str,
+        hooks: Option<Arc<zeroclaw_runtime::hooks::HookRunner>>,
+        observer: Arc<dyn Observer>,
+        tools: Vec<Box<dyn Tool>>,
+        risk_profile: zeroclaw_config::schema::RiskProfileConfig,
+    ) -> Arc<ChannelRuntimeContext> {
         let mut channels_by_name = HashMap::new();
         channels_by_name.insert(channel.name().to_string(), channel);
 
@@ -36936,6 +36964,128 @@ BTC is currently around $65,000 based on latest tool output."#
         );
     }
 
+    /// Records the approval prompt the turn's gate hands to the channel, so the
+    /// prompt's provenance (here: its thread anchor) can be asserted.
+    struct AnchorRecordingChannel {
+        seen: Mutex<Option<zeroclaw_api::channel::ChannelApprovalRequest>>,
+    }
+
+    impl ::zeroclaw_api::attribution::Attributable for AnchorRecordingChannel {
+        fn role(&self) -> ::zeroclaw_api::attribution::Role {
+            ::zeroclaw_api::attribution::Role::Channel(
+                ::zeroclaw_api::attribution::ChannelKind::Webhook,
+            )
+        }
+
+        fn alias(&self) -> &str {
+            "anchor-recording"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for AnchorRecordingChannel {
+        fn name(&self) -> &str {
+            "anchor-recording"
+        }
+
+        async fn send(&self, _message: &SendMessage) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn listen(
+            &self,
+            _tx: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn request_approval_attributed(
+            &self,
+            _recipient: &str,
+            request: &zeroclaw_api::channel::ChannelApprovalRequest,
+        ) -> anyhow::Result<Option<zeroclaw_api::channel::AttributedApprovalResponse>> {
+            *self.seen.lock().expect("approval recorder lock") = Some(request.clone());
+            Ok(Some(
+                zeroclaw_api::channel::AttributedApprovalResponse::operator(
+                    zeroclaw_api::channel::ChannelApprovalResponse::Approve,
+                ),
+            ))
+        }
+    }
+
+    /// The prompt for a gated tool must inherit the inbound message's thread
+    /// anchor, so the decision stays beside the turn that triggered it, and a
+    /// turn with no anchor must not invent one.
+    #[tokio::test]
+    async fn approval_prompt_inherits_the_inbound_thread_anchor() {
+        for (thread_ts, expected) in [
+            (
+                Some("$anchor:localhost".to_string()),
+                Some("$anchor:localhost"),
+            ),
+            (None, None),
+        ] {
+            let risk_profile = zeroclaw_config::schema::RiskProfileConfig {
+                always_ask: vec!["mock_price".to_string()],
+                ..Default::default()
+            };
+            let mut prompt_config = zeroclaw_config::schema::Config::default();
+            prompt_config
+                .risk_profiles
+                .insert("gate-mock".to_string(), risk_profile.clone());
+            prompt_config.agents.insert(
+                "test-agent".to_string(),
+                zeroclaw_config::schema::AliasedAgentConfig {
+                    risk_profile: "gate-mock".into(),
+                    ..Default::default()
+                },
+            );
+
+            let channel = Arc::new(AnchorRecordingChannel {
+                seen: Mutex::new(None),
+            });
+            let ctx = test_runtime_ctx_with_observer_tools_and_profile(
+                Arc::clone(&channel) as Arc<dyn Channel>,
+                Arc::new(ToolCallingModelProvider),
+                prompt_config,
+                zeroclaw_config::schema::AliasedAgentConfig::default(),
+                "test-provider",
+                None,
+                Arc::new(NoopObserver),
+                vec![Box::new(MockPriceTool)],
+                risk_profile,
+            );
+
+            process_channel_message(
+                ctx,
+                zeroclaw_api::channel::ChannelMessage {
+                    id: "anchor-msg".to_string(),
+                    sender: "alice".to_string(),
+                    reply_target: "chat-anchor".to_string(),
+                    content: "price?".to_string(),
+                    channel: "anchor-recording".into(),
+                    timestamp: 1,
+                    thread_ts: thread_ts.clone(),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await;
+
+            let seen = channel
+                .seen
+                .lock()
+                .expect("approval recorder lock")
+                .clone()
+                .expect("the gated tool must ask the channel");
+            assert_eq!(
+                seen.thread_ts.as_deref(),
+                expected,
+                "the inbound thread anchor ({thread_ts:?}) must reach the prompt unchanged"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn approval_wait_resumes_typing_for_approval_or_unsupported_response() {
         use zeroclaw_api::channel::{
@@ -37007,6 +37157,7 @@ BTC is currently around $65,000 based on latest tool output."#
                             arguments_summary: "command".to_string(),
                             raw_arguments: None,
                             position: None,
+                            thread_ts: None,
                         },
                     )
                     .await

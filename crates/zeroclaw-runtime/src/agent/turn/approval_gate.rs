@@ -64,6 +64,7 @@ pub(crate) async fn gate_tool_approval(
                     arguments_summary,
                     raw_arguments: Some(request.arguments.clone()),
                     position: Some(position),
+                    thread_ts: ctx.channel_thread_anchor.map(str::to_string),
                 };
                 let recipient = ctx.channel_reply_target.unwrap_or_default();
                 // Narration rides the async delta queue to the draft updater,
@@ -336,6 +337,7 @@ mod tests {
             approval,
             channel_name: "test",
             channel_reply_target: Some("operator"),
+            channel_thread_anchor: None,
             cancellation_token: None,
             on_delta: None,
             event_tx: None,
@@ -509,6 +511,110 @@ mod tests {
 
     struct ApprovingChannel {
         approval_requests: Arc<AtomicUsize>,
+    }
+
+    /// Records the approval request the gate handed to the channel, so the
+    /// prompt's provenance (here: its thread anchor) can be asserted.
+    struct RecordingChannel {
+        seen: Arc<parking_lot::Mutex<Option<ChannelApprovalRequest>>>,
+    }
+
+    impl Attributable for RecordingChannel {
+        fn role(&self) -> Role {
+            Role::Channel(ChannelKind::AcpChannel)
+        }
+        fn alias(&self) -> &str {
+            "recording-test"
+        }
+    }
+
+    #[async_trait]
+    impl Channel for RecordingChannel {
+        fn name(&self) -> &str {
+            "recording-test"
+        }
+
+        async fn send(&self, _message: &SendMessage) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn listen(
+            &self,
+            _tx: tokio::sync::mpsc::Sender<ChannelMessage>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn request_approval(
+            &self,
+            _recipient: &str,
+            request: &ChannelApprovalRequest,
+        ) -> anyhow::Result<Option<ChannelApprovalResponse>> {
+            *self.seen.lock() = Some(request.clone());
+            Ok(Some(ChannelApprovalResponse::Approve))
+        }
+    }
+
+    /// The prompt must carry the turn's thread anchor so Matrix can post it in
+    /// the originating thread, and carry nothing when the turn had no thread.
+    #[tokio::test]
+    async fn channel_approval_request_carries_the_turn_thread_anchor() {
+        let observer = NoopObserver;
+        let pacing = PacingConfig::default();
+        let profile = full_always_ask_profile();
+        let approval = ApprovalManager::for_non_interactive_backchannel(&profile);
+        let seen = Arc::new(parking_lot::Mutex::new(None));
+        let channel = RecordingChannel {
+            seen: Arc::clone(&seen),
+        };
+        let ctx = TurnCtx {
+            channel_thread_anchor: Some("$origin-anchor:example.invalid"),
+            ..test_ctx(&observer, &pacing, Some(&approval), Some(&channel))
+        };
+
+        let outcome = gate_tool_approval(
+            &ctx,
+            "shell",
+            &serde_json::json!({"command": "ls"}),
+            0,
+            zeroclaw_api::channel::ApprovalPosition { index: 1, total: 1 },
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            ApprovalGateOutcome::Proceed { approved: true }
+        ));
+        assert_eq!(
+            seen.lock()
+                .as_ref()
+                .expect("the gate must ask the channel")
+                .thread_ts
+                .as_deref(),
+            Some("$origin-anchor:example.invalid")
+        );
+
+        let unthreaded = test_ctx(&observer, &pacing, Some(&approval), Some(&channel));
+        assert_eq!(unthreaded.channel_thread_anchor, None);
+        let outcome = gate_tool_approval(
+            &unthreaded,
+            "shell",
+            &serde_json::json!({"command": "ls"}),
+            0,
+            zeroclaw_api::channel::ApprovalPosition { index: 1, total: 1 },
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            ApprovalGateOutcome::Proceed { approved: true }
+        ));
+        assert_eq!(
+            seen.lock()
+                .as_ref()
+                .expect("the gate must ask the channel")
+                .thread_ts,
+            None,
+            "a turn with no thread anchor must not invent one"
+        );
     }
 
     impl Attributable for ApprovingChannel {
@@ -690,6 +796,7 @@ mod tests {
             approval: Some(&approval),
             channel_name: "rpc",
             channel_reply_target: Some("operator"),
+            channel_thread_anchor: None,
             cancellation_token: Some(&cancel),
             on_delta: None,
             event_tx: None,

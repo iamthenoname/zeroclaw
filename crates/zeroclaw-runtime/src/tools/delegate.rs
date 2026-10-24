@@ -5265,6 +5265,7 @@ impl DelegateTool {
                 injected_memory_preamble: &mut subagent_injected_memory_preamble,
                 channel_name: "delegate",
                 channel_reply_target: None,
+                channel_thread_anchor: None,
                 cancellation_token: Some(self.turn_bound_child_token()),
                 on_delta: None,
                 shared_budget: execution_tree_budget.clone(),
