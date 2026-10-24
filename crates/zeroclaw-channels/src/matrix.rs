@@ -3482,19 +3482,25 @@ mod outbound {
         Ok(buf)
     }
 
+    /// The thread root an outbound message belongs to. Requires the channel's
+    /// `reply_in_thread` setting and a non-empty anchor.
+    pub(super) fn outbound_thread_anchor(
+        reply_in_thread: bool,
+        thread_ts: Option<&str>,
+    ) -> Option<&str> {
+        if reply_in_thread {
+            thread_ts.filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    }
+
     pub(super) fn thread_anchor_from_message(
         outbox: &Outbox<'_>,
         message: &SendMessage,
     ) -> Option<OwnedEventId> {
-        if outbox.reply_in_thread {
-            message
-                .thread_ts
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .and_then(|s| s.parse().ok())
-        } else {
-            None
-        }
+        outbound_thread_anchor(outbox.reply_in_thread, message.thread_ts.as_deref())
+            .and_then(|s| s.parse().ok())
     }
 
     pub(super) async fn deliver_attachments(
@@ -3686,10 +3692,9 @@ mod outbound {
             }
         }
 
-        let event_id = if let (true, Some(anchor)) = (
-            outbox.reply_in_thread,
-            message.thread_ts.as_deref().filter(|s| !s.is_empty()),
-        ) {
+        let text_anchor =
+            outbound_thread_anchor(outbox.reply_in_thread, message.thread_ts.as_deref());
+        let event_id = if let Some(anchor) = text_anchor {
             send_threaded_reply(
                 &room,
                 &delivery.text,
@@ -4514,13 +4519,7 @@ impl MatrixChannel {
 
     /// Thread anchor for a voice note accompanying a plain send.
     fn voice_thread_anchor(&self, message: &SendMessage) -> Option<OwnedEventId> {
-        if !self.config.reply_in_thread {
-            return None;
-        }
-        message
-            .thread_ts
-            .as_deref()
-            .filter(|s| !s.is_empty())
+        outbound::outbound_thread_anchor(self.config.reply_in_thread, message.thread_ts.as_deref())
             .and_then(|s| s.parse().ok())
     }
 
@@ -4989,11 +4988,11 @@ impl Channel for MatrixChannel {
                 // No initial message — paragraphs are emitted by update_draft
                 // as they appear. Capture the thread anchor up front so each
                 // paragraph lands in the same thread as the user's message.
-                let thread_anchor = message
-                    .thread_ts
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .and_then(|s| s.parse::<OwnedEventId>().ok());
+                let thread_anchor = outbound::outbound_thread_anchor(
+                    self.config.reply_in_thread,
+                    message.thread_ts.as_deref(),
+                )
+                .and_then(|s| s.parse::<OwnedEventId>().ok());
                 let draft_id = streaming::new_multi_message_draft_id();
                 let key = streaming::draft_key(room_id, &draft_id)?;
                 let mut state = self.streaming_state.write().await;
