@@ -466,6 +466,38 @@ for only one extension tool.
 
 When a tool needs approval (it is in `always_ask`, or the risk profile does not auto-approve it), the agent posts the request into the room the message came from and waits. The prompt lands in the same thread as the turn that triggered it, so the decision stays next to the tool call instead of scrolling away in the room timeline. A turn with no thread anchor posts in the timeline, and with `reply_in_thread = false` the prompt stays in the timeline like every other reply. A configured `approval_route` overrides all of this: the prompt goes to the configured approver channel instead and does not inherit the origin thread.
 
+**Reply with the token.** This works in every room and every mode:
+
+```
+APPROVAL REQUIRED [K7QM4XZP]
+Tool: shell
+Args: command: pwd
+
+Reply `K7QM4XZP approve` / `K7QM4XZP deny` / `K7QM4XZP always`.
+```
+
+That is the English rendering; other locales are translated, but the token and the `approve` / `deny` / `always` keywords stay ASCII. A token is 8 characters from an uppercase alphabet with the visually ambiguous letters removed. Answer with the token and a verb, case-insensitively (`yes` and `no` are accepted for approve and deny):
+
+```
+K7QM4XZP approve
+K7QM4XZP deny
+K7QM4XZP always
+```
+
+A reply that matches a pending token is consumed as a decision and never reaches the model. Your client's reply affordance works too: the `> ` quoted fallback lines a rich reply prepends are stripped before parsing, though quoting the prompt without typing an answer is not an answer.
+
+**Tap a reaction.** The bot seeds two reactions on its own prompt: ✅ approves this one call and ❌ denies it. `always` has no seeded emoji, because it grants a session-scoped allowlist entry rather than permitting a single call, and one mis-tap beside ✅ is too cheap a way to widen a session. Escalating therefore stays a typed decision, or a ♾️ reaction an operator adds by hand. Emoji are matched with the U+FE0F variation selector stripped, so clients that normalize emoji still resolve. Both seeded reactions are removed once the prompt is spent, so an answered prompt stops looking actionable.
+
+**Who may answer, and where.** The token is a correlator, not a password: it travels in plaintext into the room, so every member can read it. Two conditions therefore both have to hold. The answering user must be in the alias's [peer group](./peer-groups.md), the same authority that decides whose messages the agent will act on. And the answer must arrive in the room the prompt was posted into: one bot serves many rooms, so a token carried into a different room is not an answer there, even from an authorized user. A typed reply may sit anywhere in that room, but a reaction must be on the prompt message itself, because the tap is resolved by the event id of the prompt. A reply or tap that fails either check is ignored, and the prompt stays open so an authorized operator can still answer it in the right place; rejected taps are recorded at `DEBUG`, and a rejected typed reply is dropped without a log. The bot ignores its own reactions, so the ✅ and ❌ it places can never answer its own prompt.
+
+**Everyone in the room can read the tool arguments.** The prompt includes the tool name and a summary of its arguments. Route approvals to a room whose membership you are comfortable showing those to.
+
+`approval_timeout_secs` bounds the wait. **The default is 300 seconds, and `0` denies within a second** rather than disabling approval, because the wait is clamped to a one second minimum, so a zero is a way to refuse every gated tool, not a way to wait forever. On timeout the request is denied and the token is discarded, so a late reply or tap cannot approve a call nobody is waiting on any more. A timeout or an unreachable prompt is recorded as the runtime denying on its own authority, not as a human refusing.
+
+Decisions are final: removing a reaction does not retract an answer, and the first valid answer retires the prompt for both paths.
+
+If the bot cannot place the emoji, most often a permissions problem, it logs `failed to seed approval reaction` at `WARN` and the prompt still works by reply. Reactions in encrypted rooms are decrypted like messages, so a key gap that hides a reaction also hides that operator's messages.
+
 ## 8. Auto-recovery from corrupted local state
 
 The matrix-rust-sdk default SQLite store is single-device and assumes the local view stays in sync with the homeserver. Two failure modes break that assumption irrecoverably; ZeroClaw detects each at startup and (when `password` + `user_id` are both configured) auto-wipes `~/.zeroclaw/state/matrix/` and re-authenticates so a fresh device is created server-side.
